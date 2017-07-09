@@ -1,13 +1,9 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
 using System.Data;
-using System.Drawing;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Windows.Forms;
 using System.Net.NetworkInformation;
+using System.Text;
+using System.Windows.Forms;
 
 namespace j223nTools.Forms
 {
@@ -20,9 +16,14 @@ namespace j223nTools.Forms
         #region Property
 
         /// <summary>
-        /// NicSettings
+        /// NIC Setting Helper
         /// </summary>
-        public List<Network.NicSetting> NicSettings { get; set; } = new List<Network.NicSetting>();
+        public Network.NicSettingHelper SettingHelper { get; set; } = new Network.NicSettingHelper();
+
+        /// <summary>
+        /// NetworkInterfaceType Table
+        /// </summary>
+        public DataTable NetworkInterfaceTypeTable { get; set; }
 
         #endregion
 
@@ -43,6 +44,7 @@ namespace j223nTools.Forms
         /// </summary>
         private void InitializeEventHandler()
         {
+            FormClosing += MainForm_FormClosing;
             loadInfoToolStripMenuItem.Click += LoadInfoToolStripMenuItem_Click;
             aboudInfoToolStripMenuItem.Click += AboudInfoToolStripMenuItem_Click;
         }
@@ -72,6 +74,7 @@ namespace j223nTools.Forms
             colNetworkInterfaceType.DisplayMember = "value";
             colNetworkInterfaceType.ValueMember = "key";
             colNetworkInterfaceType.DataSource = dt;
+            NetworkInterfaceTypeTable = dt;
         }
 
         /// <summary>
@@ -79,8 +82,50 @@ namespace j223nTools.Forms
         /// </summary>
         private void InitializeBindingSource()
         {
-            mainBindingSource.DataSource = NicSettings;
-            mainBindingSource.ResetBindings(false);
+            mainBindingSource.DataSource = SettingHelper.Table;
+        }
+
+        #endregion
+
+        #region Release
+
+        /// <summary>
+        /// Release GridView DataSource
+        /// </summary>
+        private void ReleaseDataSource()
+        {
+            mainBindingSource.CancelEdit();
+            mainBindingSource.DataSource = null;
+            mainGrid.DataSource = null;
+        }
+
+        /// <summary>
+        /// 使用中のリソースをすべてクリーンアップします。
+        /// </summary>
+        /// <param name="disposing">マネージ リソースを破棄する場合は true を指定し、その他の場合は false を指定します。</param>
+        /// <remarks>
+        /// CA2213 is known bug in FxCop.
+        /// Ref. Code Analysis Warning CA2213 - Call Dispose() on IDisposable backing field / stackoverflow
+        /// * https://stackoverflow.com/questions/34583417/code-analysis-warning-ca2213-call-dispose-on-idisposable-backing-field
+        /// </remarks>
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Microsoft.Usage", "CA2213:DisposableFieldsShouldBeDisposed", MessageId = "<SettingHelper>k__BackingField")]
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (components != null) components.Dispose();
+                if (SettingHelper != null)
+                {
+                    SettingHelper.Dispose();
+                    SettingHelper = null;
+                }
+                if (NetworkInterfaceTypeTable != null)
+                {
+                    NetworkInterfaceTypeTable.Dispose();
+                    NetworkInterfaceTypeTable = null;
+                }
+            }
+            base.Dispose(disposing);
         }
 
         #endregion
@@ -88,20 +133,23 @@ namespace j223nTools.Forms
         #region Event
 
         /// <summary>
+        /// Closing Form
+        /// </summary>
+        private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            // IndexOutOfRangeException対策
+            ReleaseDataSource();
+        }
+
+        /// <summary>
         /// Click AboutInfo
         /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="e"></param>
         private void AboudInfoToolStripMenuItem_Click(object sender, EventArgs e) { using (var f = new AboutForm()) { f.ShowDialog(this); } }
 
         /// <summary>
         /// Click LoadNetworkInfo
         /// </summary>
-        private void LoadInfoToolStripMenuItem_Click(object sender, EventArgs e)
-        {
-            LoadNicSettings();
-            mainBindingSource.ResetBindings(false);
-        }
+        private void LoadInfoToolStripMenuItem_Click(object sender, EventArgs e) { LoadNicSettings(); }
 
         #endregion
 
@@ -113,37 +161,47 @@ namespace j223nTools.Forms
         private void LoadNicSettings()
         {
             var nics = NetworkInterface.GetAllNetworkInterfaces();
-            foreach (var adapter in nics)
+            foreach (var adapter in nics.Where(n => n.NetworkInterfaceType == NetworkInterfaceType.Ethernet || n.NetworkInterfaceType == NetworkInterfaceType.Wireless80211))
             {
-                var setting = NicSettings.Where(s => s.Id == adapter.Id).FirstOrDefault();
-                if (setting == null)
+                DataRow row;
+                if (SettingHelper.Table.Rows.Contains(adapter.Id))
+                    row = SettingHelper.Table.Rows.Find(adapter.Id);
+                else
                 {
-                    setting = new Network.NicSetting();
-                    NicSettings.Add(setting);
+                    row = SettingHelper.Table.NewRow();
+                    row["Id"] = adapter.Id;
+                    SettingHelper.Table.Rows.Add(row);
                 }
-                setting.Id = adapter.Id;
-                setting.Name = adapter.Name;
-                setting.NetworkInterfaceType = (int)adapter.NetworkInterfaceType;
-                setting.IPv4Address = string.Empty;
-                setting.IPv4IsDHCP = false;
+                row["Name"] = adapter.Name;
+                row["NetworkInterfaceType"] = (int)adapter.NetworkInterfaceType;
+                row["ActiveIPv4Address"] = string.Empty;
+                row["ActiveIPv4IsDHCP"] = false;
                 if (adapter.Supports(NetworkInterfaceComponent.IPv4))
                 {
                     var adapterProperties = adapter.GetIPProperties();
                     var ipv4Properties = adapterProperties.GetIPv4Properties();
                     if (ipv4Properties == null)
-                        setting.IPv4Address = "No IPv4 Information.";
+                        row["ActiveIPv4Address"] = "NO INFO";
                     else
                     {
-                        setting.IPv4IsDHCP = ipv4Properties.IsDhcpEnabled;
+                        row["ActiveIPv4IsDHCP"] = ipv4Properties.IsDhcpEnabled;
                         foreach (var ip in adapterProperties.UnicastAddresses.Where(ip => ip.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork))
                         {
-                            setting.IPv4Address = ip.Address.ToString();
+                            row["ActiveIPv4Address"] = ip.Address.ToString();
+                            row["ActiveIPv4Mask"] = ip.IPv4Mask.ToString();
                             break;
                         }
                     }
+                    var dnsAddresses = new StringBuilder();
+                    foreach (var dns in adapterProperties.DnsAddresses)
+                        dnsAddresses.AppendLine(dns.ToString());
+                    if (dnsAddresses.Length == 0)
+                        row["ActiveDNS"] = string.Empty;
+                    else
+                        row["ActiveDNS"] = dnsAddresses.ToString().Trim();
                 }
                 else
-                    setting.IPv4Address = "IPv4 Unsupport Adapter.";
+                    row["ActiveIPv4Address"] = "UNSUPPORT";
             }
         }
 
